@@ -1,0 +1,135 @@
+name: prod-ci
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ── 1. Build and push Docker image to prod ECR ──────────────────────────────
+  build-push-ecr:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_PROD_REPOSITORY }}
+      DOCKERFILE_PATH: .bedrock_agentcore/Analysis_Copilot/Dockerfile
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG_SHA: sha-${{ github.sha }}
+          IMAGE_TAG_BRANCH: prod-latest
+        run: |
+          docker build -f "$DOCKERFILE_PATH" \
+            -t "$ECR_REPOSITORY:$IMAGE_TAG_SHA" \
+            -t "$ECR_REPOSITORY:$IMAGE_TAG_BRANCH" .
+          docker push "$ECR_REPOSITORY:$IMAGE_TAG_SHA"
+          docker push "$ECR_REPOSITORY:$IMAGE_TAG_BRANCH"
+
+  # ── 2. Discover lambda functions under mcp/ ──────────────────────────────────
+  discover-lambdas:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Scan mcp/ for lambda functions
+        id: scan
+        shell: bash
+        run: |
+          lambdas=()
+          for dir in mcp/*/; do
+            name="$(basename "$dir")"
+            if [ -f "$dir/handler.py" ]; then
+              lambdas+=("{\"lambda_name\":\"$name\",\"lambda_src\":\"mcp/$name\"}")
+            fi
+          done
+          if [ ${#lambdas[@]} -eq 0 ]; then
+            echo "No lambda functions found in mcp/" >&2
+            exit 1
+          fi
+          json="[$(IFS=','; echo "${lambdas[*]}")]"
+          echo "matrix={\"include\":$json}" >> "$GITHUB_OUTPUT"
+
+  # ── 3. Build ZIP and upload to prod S3 (one job per lambda) ──────────────────
+  build-upload-lambda:
+    needs: discover-lambdas
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.discover-lambdas.outputs.matrix) }}
+      fail-fast: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      LAMBDA_S3_BUCKET: ${{ vars.LAMBDA_S3_BUCKET_PROD }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package lambda ZIP
+        id: package
+        shell: bash
+        run: |
+          chmod +x scripts/package_lambda.sh
+          scripts/package_lambda.sh "${{ matrix.lambda_src }}" "${{ matrix.lambda_name }}"
+          echo "zip_path=build/lambda/${{ matrix.lambda_name }}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ZIP to S3 and capture object version
+        id: upload
+        shell: bash
+        run: |
+          KEY="${{ matrix.lambda_name }}/${{ github.sha }}.zip"
+          VERSION_ID="$(aws s3api put-object \
+            --bucket "$LAMBDA_S3_BUCKET" \
+            --key "$KEY" \
+            --body "${{ steps.package.outputs.zip_path }}" \
+            --query 'VersionId' \
+            --output text)"
+          echo "s3_bucket=$LAMBDA_S3_BUCKET" >> "$GITHUB_OUTPUT"
+          echo "s3_key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "s3_object_version=$VERSION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Terraform metadata file
+        shell: bash
+        run: |
+          mkdir -p build/terraform
+          cat > "build/terraform/${{ matrix.lambda_name }}.tfvars.json" <<EOF
+          {
+            "lambda_artifact_s3_bucket": "${{ steps.upload.outputs.s3_bucket }}",
+            "lambda_artifact_s3_key": "${{ steps.upload.outputs.s3_key }}",
+            "lambda_artifact_s3_object_version": "${{ steps.upload.outputs.s3_object_version }}"
+          }
+          EOF
+
+      - name: Upload Terraform metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfvars-prod-${{ matrix.lambda_name }}-${{ github.sha }}
+          path: build/terraform/${{ matrix.lambda_name }}.tfvars.json

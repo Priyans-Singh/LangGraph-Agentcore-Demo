@@ -38,3 +38,56 @@ will work out of the box.
 After providing credentials, `agentcore deploy` will deploy your project into Amazon Bedrock AgentCore.
 
 Use `agentcore invoke` to invoke your deployed agent.
+
+# CI/CD release flow
+
+This repository now includes branch-based GitHub Actions workflows for pre-prod and prod image publishing to ECR, plus Lambda artifact packaging for Terraform-driven deployment.
+
+## Branch triggers
+
+- Push to `preprod`:
+  - builds Docker image and pushes to pre-prod ECR
+  - builds Lambda ZIP and uploads to pre-prod Lambda artifact S3 bucket
+- Push to `main`:
+  - builds Docker image and pushes to prod ECR
+  - builds Lambda ZIP and uploads to prod Lambda artifact S3 bucket
+
+Promotion to production is controlled by your PR approval + merge policy into `main`.
+
+## Workflows
+
+- `.github/workflows/preprod-ci.yml`
+- `.github/workflows/prod-ci.yml`
+- `.github/workflows/lambda-artifact.yml`
+
+## Required GitHub Variables
+
+- `AWS_REGION`
+- `ECR_PREPROD_REPOSITORY` (full pre-prod ECR repo URI)
+- `ECR_PROD_REPOSITORY` (full prod ECR repo URI)
+- `LAMBDA_S3_BUCKET_PREPROD`
+- `LAMBDA_S3_BUCKET_PROD`
+- Optional: `LAMBDA_S3_PREFIX` (default is `lambda-artifacts`)
+
+## Required GitHub Secrets
+
+- `AWS_ROLE_ARN_PREPROD`
+- `AWS_ROLE_ARN_PROD`
+
+The workflows use GitHub OIDC role assumption through `aws-actions/configure-aws-credentials`.
+
+## Lambda artifact output contract
+
+The Lambda artifact pipeline uploads a ZIP and emits:
+
+- `s3_bucket`
+- `s3_key`
+- `s3_object_version`
+
+It also uploads a build artifact file `ci.auto.tfvars.json` with:
+
+- `lambda_artifact_s3_bucket`
+- `lambda_artifact_s3_key`
+- `lambda_artifact_s3_object_version`
+
+Terraform in `infra/terraform` consumes these values to deploy an immutable Lambda artifact version.
