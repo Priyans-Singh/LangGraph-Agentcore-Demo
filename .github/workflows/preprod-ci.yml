@@ -75,6 +75,7 @@ jobs:
   build-upload-lambda:
     needs: discover-lambdas
     runs-on: ubuntu-latest
+    environment: preprod
     strategy:
       matrix: ${{ fromJson(needs.discover-lambdas.outputs.matrix) }}
       fail-fast: false
