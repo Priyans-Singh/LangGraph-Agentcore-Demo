@@ -14,6 +14,7 @@ jobs:
   # ── 1. Build and push Docker image to pre-prod ECR ──────────────────────────
   build-push-ecr:
     runs-on: ubuntu-latest
+    environment: preprod
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ECR_REPOSITORY: ${{ vars.ECR_PREPROD_REPOSITORY }}
