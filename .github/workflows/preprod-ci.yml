@@ -23,6 +23,12 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -32,16 +38,19 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push image
+      - name: Build and push image (linux/arm64)
         env:
           IMAGE_TAG_SHA: sha-${{ github.sha }}
           IMAGE_TAG_BRANCH: preprod-latest
         run: |
-          docker build -f "$DOCKERFILE_PATH" \
+          docker buildx build \
+            --platform linux/arm64 \
+            --provenance=false \
+            -f "$DOCKERFILE_PATH" \
             -t "$ECR_REPOSITORY:$IMAGE_TAG_SHA" \
-            -t "$ECR_REPOSITORY:$IMAGE_TAG_BRANCH" .
-          docker push "$ECR_REPOSITORY:$IMAGE_TAG_SHA"
-          docker push "$ECR_REPOSITORY:$IMAGE_TAG_BRANCH"
+            -t "$ECR_REPOSITORY:$IMAGE_TAG_BRANCH" \
+            --push \
+            .
 
   # ── 2. Discover lambda functions under mcp/ ──────────────────────────────────
   discover-lambdas:
